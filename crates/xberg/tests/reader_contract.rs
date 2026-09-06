@@ -81,3 +81,17 @@ fn reader_extraction_honors_a_preexisting_cancellation_request_before_reading() 
     assert!(matches!(error, xberg::XbergError::Cancelled));
     assert!(sink.events.is_empty());
 }
+
+#[test]
+fn reader_extraction_rejects_a_retained_capability_that_disagrees_with_its_declared_length() {
+    let mut source = Cursor::new(b"nineteen-byte-source".to_vec());
+    let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain").with_length(18));
+    let mut sink = RecordingSink::default();
+
+    let error = Engine::new_default()
+        .extract_reader(input, &ExtractionConfig::default(), &mut sink)
+        .expect_err("the caller-supplied source length must bind the retained reader");
+
+    assert!(matches!(error, xberg::XbergError::Validation { .. }));
+    assert!(!matches!(sink.events.last(), Some(ExtractionEvent::Complete(_))));
+}

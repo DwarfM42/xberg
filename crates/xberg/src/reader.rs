@@ -208,6 +208,7 @@ pub(crate) fn extract_reader(
     if reader_format_capabilities(&descriptor.mime_type).is_none() {
         return Err(XbergError::UnsupportedFormat(descriptor.mime_type));
     }
+    let expected_length = descriptor.length;
     let mut offset = match start_position {
         ReaderStartPosition::ResetToStart => reader.seek(SeekFrom::Start(0))?,
         ReaderStartPosition::Current => reader.stream_position()?,
@@ -242,6 +243,11 @@ pub(crate) fn extract_reader(
         }
     }
 
+    if expected_length.is_some_and(|expected| expected != offset) {
+        return Err(XbergError::validation(
+            "retained reader length differs from the caller-supplied source fact",
+        ));
+    }
     sink.emit(ExtractionEvent::Complete(ExtractionComplete { source_end: offset }))
 }
 
