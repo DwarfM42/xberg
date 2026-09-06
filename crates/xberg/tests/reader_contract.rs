@@ -1,0 +1,83 @@
+use std::io::{Cursor, Seek, SeekFrom};
+
+use xberg::{
+    Engine, ExtractionConfig, ExtractionEvent, ExtractionSink, ReaderInput, ReaderStartPosition, SourceDescriptor,
+    SourceGeometry,
+};
+
+#[derive(Default)]
+struct RecordingSink {
+    events: Vec<ExtractionEvent>,
+}
+
+impl ExtractionSink for RecordingSink {
+    fn emit(&mut self, event: ExtractionEvent) -> xberg::Result<()> {
+        self.events.push(event);
+        Ok(())
+    }
+}
+
+#[test]
+fn reader_extraction_uses_the_callers_current_capability_without_a_path_reopen() {
+    let mut source = Cursor::new(b"ignore\nfirst\nsecond".to_vec());
+    source.seek(SeekFrom::Start(7)).unwrap();
+    let input = ReaderInput::new(
+        &mut source,
+        SourceDescriptor::new("text/plain").with_filename("retained.txt"),
+    )
+    .with_start_position(ReaderStartPosition::Current)
+    .with_max_fragment_bytes(5)
+    .unwrap();
+    let mut sink = RecordingSink::default();
+
+    Engine::new_default()
+        .extract_reader(input, &ExtractionConfig::default(), &mut sink)
+        .unwrap();
+
+    let text_events: Vec<_> = sink
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ExtractionEvent::Text(fragment) => Some(fragment),
+            _ => None,
+        })
+        .collect();
+    assert!(!text_events.is_empty());
+    assert!(text_events.iter().all(|fragment| fragment.text.len() <= 5));
+    assert_eq!(
+        text_events
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect::<String>(),
+        "first\nsecond"
+    );
+    assert_eq!(
+        text_events.first().unwrap().source,
+        SourceGeometry::ExactRawByteSpan { start: 7, end: 12 }
+    );
+    assert_eq!(
+        text_events.last().unwrap().source,
+        SourceGeometry::ExactRawByteSpan { start: 17, end: 19 }
+    );
+    assert!(matches!(sink.events.last(), Some(ExtractionEvent::Complete(_))));
+}
+
+#[test]
+fn reader_extraction_honors_a_preexisting_cancellation_request_before_reading() {
+    let token = xberg::cancellation::CancellationToken::new();
+    token.cancel();
+    let config = ExtractionConfig {
+        cancel_token: Some(token),
+        ..ExtractionConfig::default()
+    };
+    let mut source = Cursor::new(b"must not be delivered".to_vec());
+    let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain"));
+    let mut sink = RecordingSink::default();
+
+    let error = Engine::new_default()
+        .extract_reader(input, &config, &mut sink)
+        .expect_err("a cancelled reader operation must not read or emit source content");
+
+    assert!(matches!(error, xberg::XbergError::Cancelled));
+    assert!(sink.events.is_empty());
+}

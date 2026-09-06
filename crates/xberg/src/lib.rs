@@ -62,6 +62,8 @@ pub mod extractors;
 ))]
 pub mod model_cache;
 pub mod plugins;
+/// Caller-retained, bounded reader extraction surface.
+pub mod reader;
 pub mod rendering;
 pub mod telemetry;
 /// Text post-processing: NER, summarisation, redaction, token reduction, and translation.
@@ -206,7 +208,13 @@ pub mod transcription;
 pub mod captioning;
 
 // NOTE: `CancellationToken` is intentionally NOT re-exported here.
+pub use engine::Engine;
 pub use error::{Result, XbergError};
+pub use reader::{
+    ExtractionComplete, ExtractionEvent, ExtractionSink, ReaderFormatCapabilities, ReaderInput, ReaderInputCapability,
+    ReaderOutputCapability, ReaderStartPosition, SourceDescriptor, SourceGeometry, SourceProvenanceCapability,
+    TextFragment, reader_format_capabilities,
+};
 pub use types::*;
 
 // root (`#[frb(mirror(CoreProperties))]` → `xberg::CoreProperties`).
