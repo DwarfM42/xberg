@@ -71,6 +71,7 @@ fn reader_extraction_honors_a_preexisting_cancellation_request_before_reading() 
         ..ExtractionConfig::default()
     };
     let mut source = Cursor::new(b"must not be delivered".to_vec());
+    source.seek(SeekFrom::Start(7)).unwrap();
     let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain"));
     let mut sink = RecordingSink::default();
 
@@ -80,6 +81,11 @@ fn reader_extraction_honors_a_preexisting_cancellation_request_before_reading() 
 
     assert!(matches!(error, xberg::XbergError::Cancelled));
     assert!(sink.events.is_empty());
+    assert_eq!(
+        source.stream_position().unwrap(),
+        7,
+        "cancellation must precede any cursor mutation"
+    );
 }
 
 #[test]

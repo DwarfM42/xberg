@@ -213,6 +213,9 @@ pub(crate) fn extract_reader(
     if reader_format_capabilities(&descriptor.mime_type).is_none() {
         return Err(XbergError::UnsupportedFormat(descriptor.mime_type));
     }
+    if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {
+        return Err(XbergError::Cancelled);
+    }
     let expected_length = descriptor.length;
     let mut offset = match start_position {
         ReaderStartPosition::ResetToStart => reader.seek(SeekFrom::Start(0))?,
