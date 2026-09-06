@@ -364,6 +364,20 @@ impl Engine {
         result
     }
 
+    /// Extract from a caller-retained reader into bounded sink events.
+    ///
+    /// This Rust-only API never accepts a path or URI and therefore cannot
+    /// reopen a mutable external source. Formats without an explicit
+    /// [`crate::reader::ReaderFormatCapabilities`] entry fail closed.
+    pub fn extract_reader(
+        &self,
+        input: crate::reader::ReaderInput<'_>,
+        config: &ExtractionConfig,
+        sink: &mut dyn crate::reader::ExtractionSink,
+    ) -> Result<()> {
+        crate::reader::extract_reader(input, config, sink)
+    }
+
     /// The injected [`CacheBackend`] seam (default: [`NoopCache`]).
     pub fn cache_backend(&self) -> &Arc<dyn CacheBackend> {
         &self.inner.cache
