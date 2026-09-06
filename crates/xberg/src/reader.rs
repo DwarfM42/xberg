@@ -9,6 +9,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::{Result, XbergError};
 
+const MIN_READER_FRAGMENT_BYTES: usize = 4;
+const MAX_READER_FRAGMENT_BYTES: usize = 1024 * 1024;
+
 /// Object-safe capability required by [`ReaderInput`].
 pub trait Reader: Read + Seek {}
 
@@ -90,8 +93,10 @@ impl<'a> ReaderInput<'a> {
     /// policy. The caller owns the chosen bound and may keep consuming events
     /// until the retained source is exhausted.
     pub fn with_max_fragment_bytes(mut self, max_fragment_bytes: usize) -> Result<Self> {
-        if max_fragment_bytes == 0 {
-            return Err(XbergError::validation("reader fragment bound must be non-zero"));
+        if !(MIN_READER_FRAGMENT_BYTES..=MAX_READER_FRAGMENT_BYTES).contains(&max_fragment_bytes) {
+            return Err(XbergError::validation(
+                "reader fragment bound must be between four bytes and one MiB",
+            ));
         }
         self.max_fragment_bytes = max_fragment_bytes;
         Ok(self)
@@ -223,7 +228,7 @@ pub(crate) fn extract_reader(
         let count = reader.read(&mut buffer)?;
         if count == 0 {
             if !pending.is_empty() {
-                emit_valid_utf8(&pending, offset, sink)?;
+                emit_valid_utf8(&pending, offset, max_fragment_bytes, config, sink)?;
                 offset = offset
                     .checked_add(pending.len() as u64)
                     .ok_or_else(|| XbergError::validation("reader source offset overflowed"))?;
@@ -231,7 +236,7 @@ pub(crate) fn extract_reader(
             break;
         }
         pending.extend_from_slice(&buffer[..count]);
-        let consumed = emit_complete_utf8_prefix(&pending, offset, sink)?;
+        let consumed = emit_complete_utf8_prefix(&pending, offset, max_fragment_bytes, config, sink)?;
         if consumed > 0 {
             offset = offset
                 .checked_add(consumed as u64)
@@ -248,19 +253,28 @@ pub(crate) fn extract_reader(
             "retained reader length differs from the caller-supplied source fact",
         ));
     }
+    if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {
+        return Err(XbergError::Cancelled);
+    }
     sink.emit(ExtractionEvent::Complete(ExtractionComplete { source_end: offset }))
 }
 
-fn emit_complete_utf8_prefix(bytes: &[u8], offset: u64, sink: &mut dyn ExtractionSink) -> Result<usize> {
+fn emit_complete_utf8_prefix(
+    bytes: &[u8],
+    offset: u64,
+    max_fragment_bytes: usize,
+    config: &crate::ExtractionConfig,
+    sink: &mut dyn ExtractionSink,
+) -> Result<usize> {
     match std::str::from_utf8(bytes) {
         Ok(_) => {
-            emit_valid_utf8(bytes, offset, sink)?;
+            emit_valid_utf8(bytes, offset, max_fragment_bytes, config, sink)?;
             Ok(bytes.len())
         }
         Err(error) if error.error_len().is_none() => {
             let valid = error.valid_up_to();
             if valid > 0 {
-                emit_valid_utf8(&bytes[..valid], offset, sink)?;
+                emit_valid_utf8(&bytes[..valid], offset, max_fragment_bytes, config, sink)?;
             }
             Ok(valid)
         }
@@ -268,16 +282,46 @@ fn emit_complete_utf8_prefix(bytes: &[u8], offset: u64, sink: &mut dyn Extractio
     }
 }
 
-fn emit_valid_utf8(bytes: &[u8], start: u64, sink: &mut dyn ExtractionSink) -> Result<()> {
+fn emit_valid_utf8(
+    bytes: &[u8],
+    start: u64,
+    max_fragment_bytes: usize,
+    config: &crate::ExtractionConfig,
+    sink: &mut dyn ExtractionSink,
+) -> Result<()> {
     if bytes.is_empty() {
         return Ok(());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| XbergError::parsing("reader source is not valid UTF-8"))?;
-    let end = start
-        .checked_add(bytes.len() as u64)
-        .ok_or_else(|| XbergError::validation("reader source offset overflowed"))?;
-    sink.emit(ExtractionEvent::Text(TextFragment {
-        text: text.to_owned(),
-        source: SourceGeometry::ExactRawByteSpan { start, end },
-    }))
+    let mut emitted = 0_usize;
+    while emitted < bytes.len() {
+        if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {
+            return Err(XbergError::Cancelled);
+        }
+        let candidate_end = (emitted + max_fragment_bytes).min(bytes.len());
+        let mut end = candidate_end;
+        while !text.is_char_boundary(end) {
+            end = end
+                .checked_sub(1)
+                .ok_or_else(|| XbergError::validation("reader fragment bound splits a UTF-8 scalar"))?;
+        }
+        if end <= emitted {
+            return Err(XbergError::validation("reader fragment bound splits a UTF-8 scalar"));
+        }
+        let fragment_start = start
+            .checked_add(emitted as u64)
+            .ok_or_else(|| XbergError::validation("reader source offset overflowed"))?;
+        let fragment_end = start
+            .checked_add(end as u64)
+            .ok_or_else(|| XbergError::validation("reader source offset overflowed"))?;
+        sink.emit(ExtractionEvent::Text(TextFragment {
+            text: text[emitted..end].to_owned(),
+            source: SourceGeometry::ExactRawByteSpan {
+                start: fragment_start,
+                end: fragment_end,
+            },
+        }))?;
+        emitted = end;
+    }
+    Ok(())
 }
