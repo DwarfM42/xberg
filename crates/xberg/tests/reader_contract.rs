@@ -99,7 +99,10 @@ fn reader_extraction_rejects_a_retained_capability_that_disagrees_with_its_decla
         .expect_err("the caller-supplied source length must bind the retained reader");
 
     assert!(matches!(error, xberg::XbergError::Validation { .. }));
-    assert!(!matches!(sink.events.last(), Some(ExtractionEvent::Complete(_))));
+    assert!(
+        sink.events.is_empty(),
+        "a length mismatch must fail before any sink event"
+    );
 }
 
 #[test]

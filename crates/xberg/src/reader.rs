@@ -221,6 +221,15 @@ pub(crate) fn extract_reader(
         ReaderStartPosition::ResetToStart => reader.seek(SeekFrom::Start(0))?,
         ReaderStartPosition::Current => reader.stream_position()?,
     };
+    if let Some(expected_length) = expected_length {
+        let observed_length = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(offset))?;
+        if observed_length != expected_length {
+            return Err(XbergError::validation(
+                "retained reader length differs from the caller-supplied source fact",
+            ));
+        }
+    }
     let mut pending = Vec::with_capacity(max_fragment_bytes.saturating_add(3));
     let mut buffer = vec![0_u8; max_fragment_bytes];
 
@@ -229,6 +238,9 @@ pub(crate) fn extract_reader(
             return Err(XbergError::Cancelled);
         }
         let count = reader.read(&mut buffer)?;
+        if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {
+            return Err(XbergError::Cancelled);
+        }
         if count == 0 {
             if !pending.is_empty() {
                 emit_valid_utf8(&pending, offset, max_fragment_bytes, config, sink)?;
