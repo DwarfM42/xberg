@@ -95,3 +95,56 @@ fn reader_extraction_rejects_a_retained_capability_that_disagrees_with_its_decla
     assert!(matches!(error, xberg::XbergError::Validation { .. }));
     assert!(!matches!(sink.events.last(), Some(ExtractionEvent::Complete(_))));
 }
+
+#[test]
+fn reader_input_rejects_fragment_windows_larger_than_the_contract_limit() {
+    let mut source = Cursor::new(Vec::new());
+
+    let error =
+        match ReaderInput::new(&mut source, SourceDescriptor::new("text/plain")).with_max_fragment_bytes(1_048_577) {
+            Ok(_) => panic!("a reader fragment window above one MiB must fail closed"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(error, xberg::XbergError::Validation { .. }));
+}
+
+#[test]
+fn reader_extraction_keeps_utf8_boundary_fragments_within_the_declared_window() {
+    let mut source = Cursor::new("ab€wxyz".as_bytes().to_vec());
+    let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain"))
+        .with_max_fragment_bytes(4)
+        .unwrap();
+    let mut sink = RecordingSink::default();
+
+    Engine::new_default()
+        .extract_reader(input, &ExtractionConfig::default(), &mut sink)
+        .unwrap();
+
+    let text_events: Vec<_> = sink
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ExtractionEvent::Text(fragment) => Some(fragment),
+            ExtractionEvent::Complete(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        text_events
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect::<String>(),
+        "ab€wxyz"
+    );
+    assert!(text_events.iter().all(|fragment| fragment.text.len() <= 4));
+    assert_eq!(
+        text_events
+            .iter()
+            .map(|fragment| match fragment.source {
+                SourceGeometry::ExactRawByteSpan { start, end } => (start, end),
+                _ => panic!("retained text fragments must retain exact raw byte spans"),
+            })
+            .collect::<Vec<_>>(),
+        vec![(0, 2), (2, 6), (6, 8), (8, 9)]
+    );
+}
