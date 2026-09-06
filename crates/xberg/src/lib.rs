@@ -211,9 +211,9 @@ pub mod captioning;
 pub use engine::Engine;
 pub use error::{Result, XbergError};
 pub use reader::{
-    ExtractionComplete, ExtractionEvent, ExtractionSink, ReaderFormatCapabilities, ReaderInput, ReaderInputCapability,
-    ReaderOutputCapability, ReaderStartPosition, SourceDescriptor, SourceGeometry, SourceProvenanceCapability,
-    TextFragment, reader_format_capabilities,
+    ExtractionComplete, ExtractionEvent, ExtractionSink, LogicalRange, ReaderFormatCapabilities, ReaderInput,
+    ReaderInputCapability, ReaderOutputCapability, ReaderStartPosition, SourceDescriptor, SourceGeometry,
+    SourceProvenanceCapability, TextFragment, reader_format_capabilities,
 };
 pub use types::*;
 

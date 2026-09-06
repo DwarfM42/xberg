@@ -135,7 +135,7 @@ fn reader_extraction_keeps_utf8_boundary_fragments_within_the_declared_window() 
         .iter()
         .filter_map(|event| match event {
             ExtractionEvent::Text(fragment) => Some(fragment),
-            ExtractionEvent::Complete(_) => None,
+            _ => None,
         })
         .collect();
     assert_eq!(
@@ -156,4 +156,109 @@ fn reader_extraction_keeps_utf8_boundary_fragments_within_the_declared_window() 
             .collect::<Vec<_>>(),
         vec![(0, 2), (2, 6), (6, 8), (8, 9)]
     );
+}
+
+fn logical_range_tuples(events: &[ExtractionEvent]) -> Vec<(u64, u64, u64, u64, u64, u32, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ExtractionEvent::LogicalRange(range) => Some((
+                range.sequence,
+                range.raw_byte_start,
+                range.raw_byte_end,
+                range.codepoint_start,
+                range.codepoint_end,
+                range.line_start,
+                range.line_end,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn reader_extraction_emits_unicode_paragraph_ranges_with_hybrid_whitespace_and_crlf_coordinates() {
+    let mut source = Cursor::new(" \u{001c}é\r\n中\n\nZ ".as_bytes().to_vec());
+    let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain"))
+        .with_max_fragment_bytes(4)
+        .unwrap();
+    let mut sink = RecordingSink::default();
+
+    Engine::new_default()
+        .extract_reader(input, &ExtractionConfig::default(), &mut sink)
+        .unwrap();
+
+    assert_eq!(
+        logical_range_tuples(&sink.events),
+        vec![(0, 2, 9, 2, 6, 1, 2), (1, 11, 12, 8, 9, 4, 4)]
+    );
+}
+
+#[test]
+fn reader_extraction_emits_ranges_across_utf8_fragment_boundaries() {
+    let mut source = Cursor::new("ab€cd\n\nef".as_bytes().to_vec());
+    let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain"))
+        .with_max_fragment_bytes(4)
+        .unwrap();
+    let mut sink = RecordingSink::default();
+
+    Engine::new_default()
+        .extract_reader(input, &ExtractionConfig::default(), &mut sink)
+        .unwrap();
+
+    assert_eq!(
+        logical_range_tuples(&sink.events),
+        vec![(0, 0, 7, 0, 5, 1, 1), (1, 9, 11, 7, 9, 3, 3)]
+    );
+}
+
+#[test]
+fn reader_extraction_emits_no_logical_ranges_for_whitespace_only_input() {
+    let mut source = Cursor::new(" \u{001c}\r\n\u{3000}\n".as_bytes().to_vec());
+    let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain"));
+    let mut sink = RecordingSink::default();
+
+    Engine::new_default()
+        .extract_reader(input, &ExtractionConfig::default(), &mut sink)
+        .unwrap();
+
+    assert!(logical_range_tuples(&sink.events).is_empty());
+    assert!(matches!(sink.events.last(), Some(ExtractionEvent::Complete(_))));
+}
+
+struct CancellingSink {
+    token: xberg::cancellation::CancellationToken,
+    events: Vec<ExtractionEvent>,
+}
+
+impl ExtractionSink for CancellingSink {
+    fn emit(&mut self, event: ExtractionEvent) -> xberg::Result<()> {
+        if matches!(event, ExtractionEvent::Text(_)) {
+            self.token.cancel();
+        }
+        self.events.push(event);
+        Ok(())
+    }
+}
+
+#[test]
+fn reader_extraction_stops_before_logical_range_delivery_when_cancelled_by_a_text_event() {
+    let token = xberg::cancellation::CancellationToken::new();
+    let config = ExtractionConfig {
+        cancel_token: Some(token.clone()),
+        ..ExtractionConfig::default()
+    };
+    let mut source = Cursor::new(b"first\n\nsecond".to_vec());
+    let input = ReaderInput::new(&mut source, SourceDescriptor::new("text/plain"));
+    let mut sink = CancellingSink {
+        token,
+        events: Vec::new(),
+    };
+
+    let error = Engine::new_default()
+        .extract_reader(input, &config, &mut sink)
+        .expect_err("cancellation must stop range delivery");
+
+    assert!(matches!(error, xberg::XbergError::Cancelled));
+    assert!(matches!(sink.events.as_slice(), [ExtractionEvent::Text(_)]));
 }
