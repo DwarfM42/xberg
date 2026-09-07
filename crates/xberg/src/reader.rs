@@ -204,14 +204,20 @@ pub struct ReaderFormatCapabilities {
     pub input: ReaderInputCapability,
     pub output: ReaderOutputCapability,
     pub provenance: SourceProvenanceCapability,
+    /// Whether the format's existing Xberg extractor is present in this build.
+    /// This does not authorize retained-reader extraction by itself.
+    pub available_in_build: bool,
     pub requires_ocr_or_model: bool,
     pub requires_native_runtime: bool,
 }
 
 /// Report the exact reader-contract state known for a MIME type.
 ///
-/// `None` means this contract has not qualified the format; callers must not
-/// infer safety from the legacy Xberg format registry.
+/// A returned status does not itself authorize [`extract_reader`]. Only the
+/// retained-source, bounded-incremental, exact-raw-span profile without an OCR,
+/// model, or native-runtime dependency may use that API. Other explicit states
+/// let hosts report why a format remains unavailable without inferring safety
+/// from the legacy Xberg format registry.
 pub fn reader_format_capabilities(mime_type: &str) -> Option<ReaderFormatCapabilities> {
     match mime_type {
         "text/plain" => Some(ReaderFormatCapabilities {
@@ -219,11 +225,44 @@ pub fn reader_format_capabilities(mime_type: &str) -> Option<ReaderFormatCapabil
             input: ReaderInputCapability::RetainedSourceCompatible,
             output: ReaderOutputCapability::BoundedIncrementalOutput,
             provenance: SourceProvenanceCapability::ExactRawSourceByteSpans,
+            available_in_build: true,
             requires_ocr_or_model: false,
             requires_native_runtime: false,
         }),
+        "text/markdown" | "application/json" | "text/csv" => Some(ReaderFormatCapabilities {
+            mime_type: match mime_type {
+                "text/markdown" => "text/markdown",
+                "application/json" => "application/json",
+                "text/csv" => "text/csv",
+                _ => unreachable!("the outer match constrains MIME values"),
+            },
+            input: ReaderInputCapability::BufferedWholeInputRequired,
+            output: ReaderOutputCapability::WholeOutputMaterializationRequired,
+            provenance: SourceProvenanceCapability::Unavailable,
+            available_in_build: true,
+            requires_ocr_or_model: false,
+            requires_native_runtime: false,
+        }),
+        "application/pdf" => Some(ReaderFormatCapabilities {
+            mime_type: "application/pdf",
+            input: ReaderInputCapability::BufferedWholeInputRequired,
+            output: ReaderOutputCapability::WholeOutputMaterializationRequired,
+            provenance: SourceProvenanceCapability::DerivedGeometryOnly,
+            available_in_build: cfg!(feature = "pdf"),
+            requires_ocr_or_model: false,
+            requires_native_runtime: true,
+        }),
         _ => None,
     }
+}
+
+fn retained_reader_is_qualified(capabilities: ReaderFormatCapabilities) -> bool {
+    capabilities.input == ReaderInputCapability::RetainedSourceCompatible
+        && capabilities.output == ReaderOutputCapability::BoundedIncrementalOutput
+        && capabilities.provenance == SourceProvenanceCapability::ExactRawSourceByteSpans
+        && capabilities.available_in_build
+        && !capabilities.requires_ocr_or_model
+        && !capabilities.requires_native_runtime
 }
 
 pub(crate) fn extract_reader(
@@ -232,7 +271,7 @@ pub(crate) fn extract_reader(
     sink: &mut dyn ExtractionSink,
 ) -> Result<()> {
     let (reader, descriptor, start_position, max_fragment_bytes) = input.into_parts();
-    if reader_format_capabilities(&descriptor.mime_type).is_none() {
+    if !reader_format_capabilities(&descriptor.mime_type).is_some_and(retained_reader_is_qualified) {
         return Err(XbergError::UnsupportedFormat(descriptor.mime_type));
     }
     if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {

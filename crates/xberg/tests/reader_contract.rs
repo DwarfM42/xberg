@@ -262,3 +262,69 @@ fn reader_extraction_stops_before_logical_range_delivery_when_cancelled_by_a_tex
     assert!(matches!(error, xberg::XbergError::Cancelled));
     assert!(matches!(sink.events.as_slice(), [ExtractionEvent::Text(_)]));
 }
+
+#[test]
+fn reader_capability_registry_reports_each_hybrid_format_without_qualifying_unsupported_reader_routes() {
+    use xberg::{
+        ReaderInputCapability, ReaderOutputCapability, SourceProvenanceCapability, reader_format_capabilities,
+    };
+
+    let text = reader_format_capabilities("text/plain").expect("text/plain must remain explicitly qualified");
+    assert_eq!(text.input, ReaderInputCapability::RetainedSourceCompatible);
+    assert_eq!(text.output, ReaderOutputCapability::BoundedIncrementalOutput);
+    assert_eq!(text.provenance, SourceProvenanceCapability::ExactRawSourceByteSpans);
+    assert!(!text.requires_ocr_or_model);
+    assert!(!text.requires_native_runtime);
+
+    for (mime, provenance, requires_native_runtime) in [
+        ("text/markdown", SourceProvenanceCapability::Unavailable, false),
+        ("application/json", SourceProvenanceCapability::Unavailable, false),
+        ("text/csv", SourceProvenanceCapability::Unavailable, false),
+        ("application/pdf", SourceProvenanceCapability::DerivedGeometryOnly, true),
+    ] {
+        let capability = reader_format_capabilities(mime)
+            .unwrap_or_else(|| panic!("{mime} must have an explicit unqualified status"));
+        assert_eq!(
+            capability.input,
+            ReaderInputCapability::BufferedWholeInputRequired,
+            "{mime}"
+        );
+        assert_eq!(
+            capability.output,
+            ReaderOutputCapability::WholeOutputMaterializationRequired,
+            "{mime}"
+        );
+        assert_eq!(capability.provenance, provenance, "{mime}");
+        assert!(!capability.requires_ocr_or_model, "{mime}");
+        assert_eq!(capability.requires_native_runtime, requires_native_runtime, "{mime}");
+    }
+
+    assert!(
+        reader_format_capabilities("text/markdown")
+            .expect("Markdown status")
+            .available_in_build
+    );
+    assert!(
+        reader_format_capabilities("application/json")
+            .expect("JSON status")
+            .available_in_build
+    );
+    assert!(
+        reader_format_capabilities("text/csv")
+            .expect("CSV status")
+            .available_in_build
+    );
+    assert_eq!(
+        reader_format_capabilities("application/pdf")
+            .expect("PDF status")
+            .available_in_build,
+        cfg!(feature = "pdf")
+    );
+
+    let mut markdown = Cursor::new(b"# heading\n".to_vec());
+    let input = ReaderInput::new(&mut markdown, SourceDescriptor::new("text/markdown"));
+    let error = Engine::new_default()
+        .extract_reader(input, &ExtractionConfig::default(), &mut RecordingSink::default())
+        .expect_err("an explicitly unqualified format must remain unavailable to retained-reader extraction");
+    assert!(matches!(error, xberg::XbergError::UnsupportedFormat(_)));
+}
